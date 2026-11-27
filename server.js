@@ -2,7 +2,6 @@ const WebSocket = require('ws');
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
-// تخزين الغرف: كل غرفة تحتوي على الأجهزة المتصلة بها
 const rooms = new Map();
 
 function broadcastDeviceList(roomCode) {
@@ -28,6 +27,7 @@ wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
+      
       if (msg.type === 'ping') {
         ws.send(JSON.stringify({ type: 'pong' }));
         return;
@@ -40,19 +40,41 @@ wss.on('connection', (ws) => {
         ws.deviceName = msg.deviceName || 'Android Device';
 
         if (!rooms.has(ws.roomCode)) rooms.set(ws.roomCode, new Set());
-        rooms.get(ws.roomCode).add(ws);
+        
+        // إزالة أي اتصال قديم عالق لنفس الجهاز لمنع التضارب
+        for (const existing of rooms.get(ws.roomCode)) {
+          if (existing.deviceId === ws.deviceId && existing.role === ws.role) {
+            rooms.get(ws.roomCode).delete(existing);
+            try { existing.terminate(); } catch (e) {}
+          }
+        }
 
+        rooms.get(ws.roomCode).add(ws);
         ws.send(JSON.stringify({ type: 'joined', id: ws.deviceId }));
         broadcastDeviceList(ws.roomCode);
         return;
       }
 
-      // توجيه الأمر لجهاز محدد (targetId) أو لكل الأجهزة في الغرفة
+      // تحديث فوري لقائمة الأجهزة عند طلبها من لوحة التحكم
+      if (msg.type === 'refresh_devices' && ws.roomCode) {
+        broadcastDeviceList(ws.roomCode);
+        return;
+      }
+
+      // توجيه الأوامر بدقة ومنع إرسال أوامر عشوائية عند اختيار الجهاز
       if (ws.roomCode && rooms.has(ws.roomCode)) {
         for (const client of rooms.get(ws.roomCode)) {
           if (client !== ws && client.readyState === WebSocket.OPEN) {
-            if (!msg.targetId || client.deviceId === msg.targetId || client.role === 'controller') {
-              client.send(data.toString());
+            if (ws.role === 'controller') {
+              // لا ترسل أي أمر من لوحة التحكم إلا إذا كان محدداً له targetId واضح
+              if (msg.targetId && client.deviceId === msg.targetId) {
+                client.send(data.toString());
+              }
+            } else {
+              // الرسائل القادمة من الجهاز الهدف تذهب للوحة التحكم فقط
+              if (client.role === 'controller') {
+                client.send(data.toString());
+              }
             }
           }
         }
@@ -75,6 +97,6 @@ setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
-}, 25000);
+}, 20000);
 
 console.log('Multi-Device Relay Server running on port ' + port);
